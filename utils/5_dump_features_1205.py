@@ -19,6 +19,8 @@ from keg_utils import Example, InputFeatures, build_graph_hotpot, build_dgl_grap
 import sys
 sys.path.append('..')
 
+# doc first, then question, not good for truncation in long texts
+
 from model_envs import MODEL_CLASSES
 from csr_mhqa.data_processing import get_cached_filename
 from eval.hotpot_evaluate_v1 import normalize_answer
@@ -69,26 +71,6 @@ def read_hotpot_examples(para_file,
                 word_offset += 1
         return words, char_to_word_offset, word_start_idx
 
-    def split_sent_with_words(sent, sent_words, offset=0):
-        words = sent_words
-        word_start_idx, char_to_word_offset = [], []
-        token_idx = 0
-        for token in words:
-            # token match a-b, then split further
-            while sent[token_idx: token_idx + len(token)] != token:
-                token_idx += 1
-
-            word_start_idx.append(token_idx)
-
-        word_offset = 0
-        for c in range(len(sent)):
-            if word_offset >= len(word_start_idx) - 1 or c < word_start_idx[word_offset + 1]:
-                char_to_word_offset.append(word_offset + offset)
-            else:
-                char_to_word_offset.append(word_offset + offset + 1)
-                word_offset += 1
-        return words, char_to_word_offset, word_start_idx
-
     max_sent_cnt, max_entity_cnt = 0, 0
     examples = []
     for case in tqdm(raw_data):
@@ -121,12 +103,6 @@ def read_hotpot_examples(para_file,
         sel_paras = para_data[key]
 
         for title in itertools.chain.from_iterable(sel_paras):
-            ctx_text_list.extend(context[title])
-        nodes, edges, sent_nodes = build_graph_hotpot(ctx_text_list, question_text)
-        # to unify the tokenization of sentences
-
-        global_sent_id = 0
-        for title in itertools.chain.from_iterable(sel_paras):
             # 对于sel_paras中的每一个title，包括others的title
             stripped_title = re.sub(r' \(.*?\)$', '', title)
             # stripped_title_norm = normalize_answer(stripped_title)
@@ -151,21 +127,14 @@ def read_hotpot_examples(para_file,
                 # build para -> sent edges
                 # build sent -> sent edges
 
-                # sent = ' '.join(sent.split())
-                # ctx_text_list.append(sent)
+                sent = ' '.join(sent.split())
+                ctx_text_list.append(sent)
                 sent += " "
                 ctx_text += sent
                 sent_start_word_id = len(doc_tokens)
                 sent_start_char_id = len(ctx_char_to_word_offset)
-                # cur_sent_words, cur_sent_char_to_word_offset, cur_sent_words_start_idx = split_sent(sent, offset=len(
-                #     doc_tokens))
-
-                # todo: sent words need splitting
-                sent_words = sent_nodes[global_sent_id].text
-                cur_sent_words, cur_sent_char_to_word_offset, cur_sent_words_start_idx = \
-                    split_sent_with_words(sent, sent_words, offset=len(doc_tokens))
-                global_sent_id += 1
-
+                cur_sent_words, cur_sent_char_to_word_offset, cur_sent_words_start_idx = split_sent(sent, offset=len(
+                    doc_tokens))
                 doc_tokens.extend(cur_sent_words)
                 ctx_char_to_word_offset.extend(cur_sent_char_to_word_offset)
                 for cur_sent_word in cur_sent_words_start_idx:
@@ -213,7 +182,7 @@ def read_hotpot_examples(para_file,
 
         # build query -> para edges (only sel_paras[0] paras)
 
-        # nodes, edges, sent_nodes = build_graph_hotpot(ctx_text_list, question_text)
+        nodes, edges, sent_nodes = build_graph_hotpot(ctx_text_list, question_text)
         #     graph, sent_num = gg.build_dgl_graph_v15(nodes, edges, sent_nodes)
 
         max_sent_cnt = max(max_sent_cnt, len(sent_start_end_position))
@@ -294,6 +263,9 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_query_
                 return _improve_answer_span(
                     subword_tokens, tok_start_position, tok_end_position, tokenizer, orig_text)
 
+        all_query_tokens = [cls_token]
+        all_doc_tokens = [cls_token]
+        tok_to_orig_index = [-1]
 
         entity_spans = []
         answer_candidates_ids = []
@@ -303,17 +275,36 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_query_
         #     if _start_pos < max_query_length and _end_pos < max_query_length:
         #         entity_spans.append((_start_pos, _end_pos))
 
+        para_spans = []
+        ques_entity_spans = []
+        para_entity_spans = []
+        sentence_spans = []
+        orig_to_tok_index = []  # 把word index映射到all_doc_tokens的token idx
+        orig_to_tok_back_index = []  # all_doc_tokens里的每个token所对应的原来word的idx
 
+        for (i, token) in enumerate(example.doc_tokens):
+            orig_to_tok_index.append(len(all_doc_tokens))
+            sub_tokens = tokenizer.tokenize(token, add_prefix_space=True)
+            for sub_token in sub_tokens:
+                tok_to_orig_index.append(i)
+                all_doc_tokens.append(sub_token)
+            orig_to_tok_back_index.append(len(all_doc_tokens) - 1)
 
-        all_query_tokens = [cls_token]
-        tok_to_orig_index = [-1]
-        ques_tok_to_orig_index = [0]
-        ques_orig_to_tok_index = []
-        ques_orig_to_tok_back_index = []
+        if is_roberta:
+            # all_query_tokens = all_query_tokens[:max_query_length-2]
+            # tok_to_orig_index = tok_to_orig_index[:max_query_length-2] + [-1, -1]
+            tok_to_orig_index += [-1, -1]
+            # roberta uses an extra separator b/w pairs of sentences
+            all_doc_tokens += [sep_token, sep_token]
+        else:
+            # all_query_tokens = all_query_tokens[:max_query_length-1]
+            # tok_to_orig_index = tok_to_orig_index[:max_query_length-1] + [-1]
+            tok_to_orig_index += [-1]
+            all_doc_tokens += [sep_token]
 
+        query_span = [len(all_doc_tokens)]
         for (i, token) in enumerate(example.question_tokens):
-            # 针对每个问题中的token依次进行tokenize
-            ques_orig_to_tok_index.append(len(all_query_tokens))
+            orig_to_tok_index.append(len(all_doc_tokens))
             if is_roberta:
                 sub_tokens = tokenizer.tokenize(token, add_prefix_space=True)
             else:
@@ -321,38 +312,12 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_query_
 
             for sub_token in sub_tokens:
                 tok_to_orig_index.append(i)
-                ques_tok_to_orig_index.append(i)
+                # ques_tok_to_orig_index.append(i)
                 all_query_tokens.append(sub_token)
-            ques_orig_to_tok_back_index.append(len(all_query_tokens) - 1)
-
-        if is_roberta:
-            all_query_tokens = all_query_tokens[:max_query_length-2]
-            tok_to_orig_index = tok_to_orig_index[:max_query_length-2] + [-1, -1]
-            # roberta uses an extra separator b/w pairs of sentences
-            all_query_tokens += [sep_token, sep_token]
-            query_span = [1, len(all_query_tokens) - 2]
-        else:
-            all_query_tokens = all_query_tokens[:max_query_length-1]
-            tok_to_orig_index = tok_to_orig_index[:max_query_length-1] + [-1]
-            all_query_tokens += [sep_token]
-            query_span = [1, len(all_query_tokens) - 1]
-
-        para_spans = []
-        sentence_spans = []
-        all_doc_tokens = []
-        orig_to_tok_index = []  # 把word index映射到all_doc_tokens的token idx
-        orig_to_tok_back_index = []  # all_doc_tokens里的每个token所对应的原来word的idx
-
-        all_doc_tokens += all_query_tokens
-
-        for (i, token) in enumerate(example.doc_tokens):
-            # 针对文档里的每个token进行tokenize
-            orig_to_tok_index.append(len(all_doc_tokens))
-            sub_tokens = tokenizer.tokenize(token, add_prefix_space=True)
-            for sub_token in sub_tokens:
-                tok_to_orig_index.append(i + len(example.question_tokens))
                 all_doc_tokens.append(sub_token)
-            orig_to_tok_back_index.append(len(all_doc_tokens) - 1)  # 用来定位token idx到word idx
+            # ques_orig_to_tok_back_index.append(len(all_query_tokens) - 1)
+            orig_to_tok_back_index.append(len(all_doc_tokens) - 1)
+        query_span.append(len(all_doc_tokens) - 1)
 
         for sent_span in example.sent_start_end_position:
             if sent_span[0] >= len(orig_to_tok_index) or sent_span[0] >= sent_span[1]:
@@ -384,10 +349,11 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_query_
             if node_span[0] >= len(orig_to_tok_index) or node_span[0] >= node_span[1]:
                 continue
             node_start_position = orig_to_tok_index[node_span[0]]
-            node_end_position = orig_to_tok_back_index[node_span[1]-1]
+            node_end_position = orig_to_tok_back_index[node_span[1]]
             node_spans.append((node_start_position, node_end_position))
             example.nodes[i].token_pos = [node_start_position, node_end_position]  # 更改node内部的token pos
             valid_node_index.append(i)
+
 
         sent_max_index = _largest_valid_index(sentence_spans, max_seq_length-1)
 

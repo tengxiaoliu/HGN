@@ -9,7 +9,7 @@ from allennlp.predictors.predictor import Predictor
 import allennlp_models.tagging
 import dgl
 from transformers import BertModel, BertConfig, BertTokenizer, AutoTokenizer
-from IPython.display import Image
+# from IPython.display import Image
 
 import logging
 
@@ -93,8 +93,11 @@ class Example(object):
                  question_word_to_char_idx,
                  ctx_text,
                  ctx_word_to_char_idx,
+                 nodes,
+                 edges,
+                 sent_nodes,
+                 p_p_edges=None,
                  graph=None,
-                 edges=None,
                  orig_answer_text=None,
                  start_position=None,
                  end_position=None):
@@ -114,10 +117,75 @@ class Example(object):
         self.ctx_word_to_char_idx = ctx_word_to_char_idx
         self.graph = graph
 
+        self.p_p_edges = p_p_edges
+
+        self.nodes = nodes
         self.edges = edges
+        self.sent_nodes = sent_nodes
         self.orig_answer_text = orig_answer_text
         self.start_position = start_position
         self.end_position = end_position
+
+class InputFeatures(object):
+    """A single set of features of data."""
+
+    def __init__(self,
+                 qas_id,
+                 doc_tokens,
+                 doc_input_ids,
+                 doc_input_mask,
+                 doc_segment_ids,
+                 query_tokens,
+                 query_input_ids,
+                 query_input_mask,
+                 query_segment_ids,
+                 para_spans,
+                 sent_spans,
+                 node_spans,
+                 sup_fact_ids,
+                 sup_para_ids,
+                 ans_type,
+                 token_to_orig_map,
+                 graph,
+                 graph_features,
+                 nodes=None,
+                 sent_nodes=None,
+                 edges=None,
+                 orig_answer_text=None,
+                 answer_candidates_ids=None,
+                 start_position=None,
+                 end_position=None):
+
+        self.qas_id = qas_id
+        self.doc_tokens = doc_tokens
+        self.doc_input_ids = doc_input_ids
+        self.doc_input_mask = doc_input_mask
+        self.doc_segment_ids = doc_segment_ids
+
+        self.query_tokens = query_tokens
+        self.query_input_ids = query_input_ids
+        self.query_input_mask = query_input_mask
+        self.query_segment_ids = query_segment_ids
+
+        self.para_spans = para_spans
+        self.sent_spans = sent_spans
+        self.node_spans = node_spans
+        self.sup_fact_ids = sup_fact_ids
+        self.sup_para_ids = sup_para_ids
+        self.ans_type = ans_type
+
+        self.graph = graph
+        self.graph_features = graph_features
+        self.nodes = nodes
+        self.edges = edges
+        self.sent_nodes = sent_nodes
+        self.token_to_orig_map = token_to_orig_map
+        self.orig_answer_text = orig_answer_text
+        self.answer_candidates_ids = answer_candidates_ids
+
+        self.start_position = start_position
+        self.end_position = end_position
+
 
 
 def do_SRL(doc):
@@ -350,7 +418,7 @@ def build_graph_hotpot(sentences, question, ante=True):
 
     qo_text = question
     qo_words = qo_text.split()
-    qo_encoded = get_sent_encoded(qo_text)
+    # qo_encoded = get_sent_encoded(qo_text)
     document += qo_text
 
     nodes.append(
@@ -500,41 +568,60 @@ def wrap(str1):
     return '\n'.join(ret)
 
 
-def visualize(nodes, edges, img='graph'):
-    g = graphviz.Digraph()
-    # g.graph_attr['concentrate']='true'
-    mentioned_x = set([x[0] for x in edges] + [x[2] for x in edges])
-
-    for i, n in enumerate(nodes):
-        if i in mentioned_x:
-            g.node(str(i), str(n.tag + ':\n' + wrap(n.text)))
-    for e in edges:
-        x1, r, x2 = e
-        if r != 'Coref':
-            g.edge(str(x1), str(x2), label=r, color='red')
-        else:
-            g.edge(str(x1), str(x2), color='blue', dir='both')
-    return Image(filename=g.render(img, format='png'))
+# def visualize(nodes, edges, img='graph'):
+#     g = graphviz.Digraph()
+#     # g.graph_attr['concentrate']='true'
+#     mentioned_x = set([x[0] for x in edges] + [x[2] for x in edges])
+#
+#     for i, n in enumerate(nodes):
+#         if i in mentioned_x:
+#             g.node(str(i), str(n.tag + ':\n' + wrap(n.text)))
+#     for e in edges:
+#         x1, r, x2 = e
+#         if r != 'Coref':
+#             g.edge(str(x1), str(x2), label=r, color='red')
+#         else:
+#             g.edge(str(x1), str(x2), color='blue', dir='both')
+#     return Image(filename=g.render(img, format='png'))
 
 
 ############build dgl graph
 
+# build_dgl_graph_hotpot(example.nodes, edges, sentence_spans, para_spans, query_span,
+#                                        example.sent_names, example.p_p_edges)
 
-def build_dgl_graph_v15(nodes, edges, sent_nodes):
+def build_dgl_graph_hotpot(nodes, edges, sent_spans, para_spans, query_span, sent_names, p_p_edges):
     """
     Build DGL homogeneous graph based on New Graph structure.
     1112: checked graph through visualisation
     1116: qo_node feature: [-10, opt id]
     1201: hotpotQA, store node separately and combine
+    Change sent_nodes to sent_span, cuz we are only using token pos in sent_nodes; add para node
     """
     # split entity nodes and q_opt nodes
     entity_nodes = nodes[:-1]
     qo_nodes = nodes[-1:]
     last_e_node_id = len(entity_nodes) - 1
 
+    # parse sent names
+    sent_to_para = []  # [0, 1, 1, 1, 2, 2, 2, 3, 3, 3]
+    para_to_sent = []  # [[0], [1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    one_para = []
+    para_idx = -1
+    for i, sent_name in enumerate(sent_names):
+        if sent_name[1] == 0:
+            if len(one_para) > 0:
+                para_to_sent.append(one_para)
+            para_idx += 1
+            one_para = []
+        sent_to_para.append(para_idx)
+        one_para.append(i)
+    if len(one_para) > 0:
+        para_to_sent.append(one_para)
+
     # From top to end
     global_node_idx = 1
-    global_node_feat = [torch.tensor([-1, -1])]
+    global_node_feat = [torch.tensor(query_span)]  # 1st node is query node
     global_src = []
     global_dst = []
     '''
@@ -547,20 +634,20 @@ def build_dgl_graph_v15(nodes, edges, sent_nodes):
     # Step 1: root node -> ed_r_s -> sent node
     #         sent node -> ed_s_s -> sent node
     # Add unidirectional edge, then dgl.add_reverse_edges()
-    global_node_idx += len(sent_nodes)
+    global_node_idx += len(sent_spans)
     tmp_ed_feat = []
 
-    for s_idx, s_node in enumerate(sent_nodes):
+    for s_idx, s_span in enumerate(sent_spans):
         global_src.extend([0, global_node_idx])
         global_dst.extend([global_node_idx, s_idx + 1])
 
         # update node
         global_node_idx += 1
         tmp_ed_feat.append(torch.tensor([-2, -2]))  # root-sent node
-        global_node_feat.append(torch.tensor(s_node.token_pos))  # sent node feat
+        global_node_feat.append(torch.tensor([s_span[0], s_span[1]]))  # sent node feat
 
         # add inter_sent node
-        if s_idx < len(sent_nodes) - 1:
+        if s_idx < len(sent_spans) - 1:
             global_src.extend([s_idx + 1, global_node_idx])
             global_dst.extend([global_node_idx, s_idx + 2])
 
@@ -657,7 +744,7 @@ def build_dgl_graph_v15(nodes, edges, sent_nodes):
     global_node_feat = torch.stack(global_node_feat)
     g.ndata['pos'] = global_node_feat
 
-    return g, len(sent_nodes)
+    return g
 
 
 def pad_seq(seq, max_len=MAX_LEN):
