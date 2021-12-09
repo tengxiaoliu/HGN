@@ -613,7 +613,7 @@ if __name__ == '__main__':
     parser.add_argument("--filter_no_ans", action='store_true',
                         help="Set this flag if you are using an uncased model.")
 
-    parser.add_argument("--date", default=1203, type=int)
+    parser.add_argument("--date", default=1209, type=int)
     args = parser.parse_args()
 
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]

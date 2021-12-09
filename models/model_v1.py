@@ -1,13 +1,21 @@
 from models.layers import *
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import dgl
+from dgl.nn import GATConv
+from tqdm import tqdm
+from transformers import BertModel, BertConfig
 from csr_mhqa.utils import count_parameters
 
 
-class HierarchicalGraphNetwork(nn.Module):
+class CSGat(nn.Module):
     """
     Packing Query Version
+    tx graph with GAT
     """
     def __init__(self, config):
-        super(HierarchicalGraphNetwork, self).__init__()
+        super(CSGat, self).__init__()
         self.config = config
         self.max_query_length = self.config.max_query_length
 
@@ -24,9 +32,22 @@ class HierarchicalGraphNetwork(nn.Module):
                                      n_layer=1,
                                      dropout=config.lstm_drop)
 
-        self.graph_blocks = nn.ModuleList()
-        for _ in range(self.config.num_gnn_layers):
-            self.graph_blocks.append(GraphBlock(self.config.q_attn, config))
+        # use DGL gat impl
+        self.gat_layers = nn.ModuleList()
+        # input projection (no residual)
+        self.gat_layers.append(GATConv(
+            config.hidden_dim, config.hidden_dim, config.gnn_attn_head[0],
+            feat_drop=config.gnn_feat_drop, residual=False))
+        # hidden layers
+        for l in range(1, config.gnn_layer):
+            # due to multi-head, the in_dim = num_hidden * num_heads
+            self.gat_layers.append(GATConv(
+                config.hidden_dim * config.gnn_attn_head[l - 1], config.hidden_dim, config.heads[l],
+                feat_drop=config.gnn_feat_drop, residual=config.gnn_residual))
+        # output projection
+        self.gat_layers.append(GATConv(
+            config.hidden_dim * config.gnn_attn_head[-2], config.hidden_dim, config.heads[-1],
+            feat_drop=config.gnn_feat_drop, residual=config.gnn_residual))
 
         self.ctx_attention = GatedAttention(input_dim=config.hidden_dim*2,
                                             memory_dim=config.hidden_dim if config.q_update else config.hidden_dim*2,
