@@ -11,6 +11,7 @@ import dgl
 from transformers import BertModel, BertConfig, BertTokenizer, AutoTokenizer
 # from IPython.display import Image
 
+import itertools
 import logging
 
 logging.getLogger('allennlp.common.params').disabled = True
@@ -141,13 +142,12 @@ class InputFeatures(object):
                  query_segment_ids,
                  para_spans,
                  sent_spans,
-                 node_spans,
+                 entity_spans,
                  sup_fact_ids,
                  sup_para_ids,
                  ans_type,
                  token_to_orig_map,
                  graph,
-                 graph_features,
                  nodes=None,
                  sent_nodes=None,
                  edges=None,
@@ -169,13 +169,12 @@ class InputFeatures(object):
 
         self.para_spans = para_spans
         self.sent_spans = sent_spans
-        self.node_spans = node_spans
+        self.entity_spans = entity_spans
         self.sup_fact_ids = sup_fact_ids
         self.sup_para_ids = sup_para_ids
         self.ans_type = ans_type
 
         self.graph = graph
-        self.graph_features = graph_features
         self.nodes = nodes
         self.edges = edges
         self.sent_nodes = sent_nodes
@@ -584,11 +583,9 @@ def wrap(str1):
 #             g.edge(str(x1), str(x2), color='blue', dir='both')
 #     return Image(filename=g.render(img, format='png'))
 
-
-############build dgl graph
-
-# build_dgl_graph_hotpot(example.nodes, edges, sentence_spans, para_spans, query_span,
-#                                        example.sent_names, example.p_p_edges)
+#######################################
+# build dgl graph
+#######################################
 
 def build_dgl_graph_hotpot(nodes, edges, sent_spans, para_spans, query_span, sent_names, p_p_edges):
     """
@@ -600,10 +597,10 @@ def build_dgl_graph_hotpot(nodes, edges, sent_spans, para_spans, query_span, sen
     """
     # split entity nodes and q_opt nodes
     entity_nodes = nodes[:-1]
-    qo_nodes = nodes[-1:]
     last_e_node_id = len(entity_nodes) - 1
 
     # parse sent names
+    assert len(sent_spans) == len(sent_names), "spans:" + str(len(sent_spans)) + ", names:" + str(len(sent_names))
     sent_to_para = []  # [0, 1, 1, 1, 2, 2, 2, 3, 3, 3]
     para_to_sent = []  # [[0], [1, 2, 3], [4, 5, 6], [7, 8, 9]]
     one_para = []
@@ -624,104 +621,123 @@ def build_dgl_graph_hotpot(nodes, edges, sent_spans, para_spans, query_span, sen
     global_node_feat = [torch.tensor(query_span)]  # 1st node is query node
     global_src = []
     global_dst = []
-    '''
-    # root node as sent node 0
-    sent_node_id = 0
-    sent_node_feat = []
-    r_s_edges = []  # feat: -2
-    s_s_edges = []  # feat: -3
-    '''
-    # Step 1: root node -> ed_r_s -> sent node
-    #         sent node -> ed_s_s -> sent node
+
+    """
+    ed_q_p: [-2, -2], query to para
+    ed_p_s: [-3, -3], para to sent
+    ed_s_s: [-4, -4], sent to sent within the same para, also applied to para to para (same level)
+    ed_s_e: [-3, -3], sent to entity (para to sent feature)
+    ed_a_a: [-1, -1], arg to arg co-reference
+    ed_v_a: [-5, -5], verb to arg
+    ed_a_v: [-6, -6], arg to verb
+    """
+
+    # Step 1.1 : query node -> ed_q_p -> para node
     # Add unidirectional edge, then dgl.add_reverse_edges()
-    global_node_idx += len(sent_spans)
+    global_node_idx += len(para_to_sent)  # para num
     tmp_ed_feat = []
 
-    for s_idx, s_span in enumerate(sent_spans):
+    for p_idx, para in enumerate(para_spans):
+        if p_idx >= len(para_to_sent):
+            continue
         global_src.extend([0, global_node_idx])
-        global_dst.extend([global_node_idx, s_idx + 1])
+        global_dst.extend([global_node_idx, p_idx + 1])
 
         # update node
         global_node_idx += 1
-        tmp_ed_feat.append(torch.tensor([-2, -2]))  # root-sent node
-        global_node_feat.append(torch.tensor([s_span[0], s_span[1]]))  # sent node feat
+        tmp_ed_feat.append(torch.tensor([-2, -2]))  # query node -> ed_q_p -> para node
+        global_node_feat.append(torch.tensor([para[0], para[1]]))  # para node feat
 
-        # add inter_sent node
-        if s_idx < len(sent_spans) - 1:
-            global_src.extend([s_idx + 1, global_node_idx])
-            global_dst.extend([global_node_idx, s_idx + 2])
-
-            # update node
-            global_node_idx += 1
-            tmp_ed_feat.append(torch.tensor([-3, -3]))  # inter-sent node
+    # Step 1.2 : para node -> ed_s_s -> para node
+    # deal with p_p_edges
+    for p_p in p_p_edges:
+        if p_p[0] >= len(para_to_sent) or p_p[1] >= len(para_to_sent):
+            continue
+        global_src.extend([p_p[0] + 1, global_node_idx])
+        global_dst.extend([global_node_idx, p_p[1] + 1])
+        # update node
+        global_node_idx += 1
+        tmp_ed_feat.append(torch.tensor([-4, -4]))  # para node -> ed_s_s -> para node
 
     global_node_feat.extend(tmp_ed_feat)
     assert len(global_node_feat) == global_node_idx
-    # PASSED test 1
+    # finish para nodes
 
-    # Step 2: sent node -> ed_s_e -> entity node
+    # Step 2: para node -> ed_p_s -> sent node
+    #         sent node -> ed_s_s -> sent node (within same para)
+
+    sent_node_base = global_node_idx
+    global_node_idx += len(sent_names)
+    tmp_ed_feat = []
+
+    for s_idx, sent in enumerate(sent_spans):
+        global_src.extend([sent_to_para[s_idx] + 1, global_node_idx])
+        global_dst.extend([global_node_idx, sent_node_base + s_idx])
+
+        # update node
+        global_node_idx += 1
+        tmp_ed_feat.append(torch.tensor([-3, -3]))  # para node -> ed_p_s -> sent node
+        global_node_feat.append(torch.tensor([sent[0], sent[1]]))  # sent node feat
+
+        if s_idx > 0 and sent_to_para[s_idx] == sent_to_para[s_idx - 1]:
+            # link sentences in the same para
+            global_src.extend([sent_node_base + s_idx - 1, global_node_idx])
+            global_dst.extend([global_node_idx, sent_node_base + s_idx])
+
+            # update node
+            global_node_idx += 1
+            tmp_ed_feat.append(torch.tensor([-4, -4]))  # sent node -> ed_s_s -> sent node
+
+    global_node_feat.extend(tmp_ed_feat)
+    assert len(global_node_feat) == global_node_idx
+    # finish sent nodes
+
+    # Step 3: sent node -> ed_s_e -> entity node [-3, -3]
     entity_node_base = global_node_idx
     global_node_idx += len(entity_nodes)
     tmp_ed_feat = []
 
     for e_idx, e_node in enumerate(entity_nodes):
-        sent_node_id = e_node.ancestor + 1
+        sent_node_id = e_node.ancestor + sent_node_base
         global_src.extend([sent_node_id, global_node_idx])
         global_dst.extend([global_node_idx, entity_node_base + e_idx])
 
         # update node
         global_node_idx += 1
-        tmp_ed_feat.append(torch.tensor([-4, -4]))  # sent-entity node
-        global_node_feat.append(torch.tensor(e_node.token_pos))  # sent node feat
+        tmp_ed_feat.append(torch.tensor([-3, -3]))  # sent node -> ed_s_e -> entity node
+        global_node_feat.append(torch.tensor(e_node.token_pos))  # entity node feat
 
     global_node_feat.extend(tmp_ed_feat)
     assert len(global_node_feat) == global_node_idx
 
-    # Step 2.5: qo node -> ed_r_q -> root node
-    # Stores qo node global node idx into qo_idx_lst
-    qo_idx_lst = []
-    for qo_id, q_node in enumerate(qo_nodes):
-        global_src.extend([0, global_node_idx])
-        global_dst.extend([global_node_idx, global_node_idx + 1])
-
-        # update node
-        global_node_feat.append(torch.tensor([-8, -8]))  # root-qo node
-        global_node_idx += 1
-        qo_idx_lst.append(global_node_idx)
-        # global_node_feat.append(torch.tensor(q_node.token_pos))  # q_opt node feat
-        # qo node feat change to [-10, qo_node_idx], for the convenience of encoding
-        global_node_feat.append(torch.tensor([-10, qo_id]))
-        global_node_idx += 1
-
+    # build graph, add bidirectional edges
     g = dgl.graph((torch.tensor(global_src), torch.tensor(global_dst)))
     g = dgl.add_reverse_edges(g)
 
-    # PASSED test 2
-
-    # Step 3: verb node -> ed_v_a -> arg node
-    #         arg node -> ed_a_v -> verb node
-    #         arg node <-> ed_a_a <-> arg node
+    # Step 4: query node <-> ed_q_p (ed_q_s) <-> sent node [-2, -2]
+    #         arg node <-> ed_a_a <-> arg node [-1, -1]
+    #         verb node -> ed_v_a -> arg node  [-5, -5]
+    #         arg node -> ed_a_v -> verb node  [-6, -6]
     add_src = []
     add_dst = []
     for edge in edges:
         if edge[1] == 'Coref':
             if edge[2] > last_e_node_id:
-                # sent-q edge: ed_s_q
+                # sent-q edge: ed_q_s
                 assert edge[0] <= last_e_node_id
-                tmp_sent_node_id = entity_nodes[edge[0]].ancestor + 1
-                tmp_qo_node_id = qo_idx_lst[edge[2] - last_e_node_id - 1]
-                add_src.extend([tmp_sent_node_id, global_node_idx, tmp_qo_node_id, global_node_idx])
-                add_dst.extend([global_node_idx, tmp_qo_node_id, global_node_idx, tmp_sent_node_id])
+                tmp_sent_node_id = entity_nodes[edge[0]].ancestor + sent_node_base
+                add_src.extend([tmp_sent_node_id, global_node_idx, 0, global_node_idx])
+                add_dst.extend([global_node_idx, 0, global_node_idx, tmp_sent_node_id])
                 # update node
                 global_node_idx += 1
-                global_node_feat.append(torch.tensor([-9, -9]))  # sent-q node
+                global_node_feat.append(torch.tensor([-2, -2]))  # query node <-> ed_q_p (ed_q_s) <-> sent node
             else:
                 # normal coref edge: ed_a_a
                 add_src.extend([entity_node_base + edge[0], global_node_idx, entity_node_base + edge[2], global_node_idx])
                 add_dst.extend([global_node_idx, entity_node_base + edge[2], global_node_idx, entity_node_base + edge[0]])
                 # update node
                 global_node_idx += 1
-                global_node_feat.append(torch.tensor([-7, -7]))  # arg-arg node
+                global_node_feat.append(torch.tensor([-1, -1]))  # arg node <-> ed_a_a <-> arg node
 
         else:
             # srl edge: ed_v_a
@@ -729,14 +745,14 @@ def build_dgl_graph_hotpot(nodes, edges, sent_spans, para_spans, query_span, sen
             add_dst.extend([global_node_idx, entity_node_base + edge[2]])
             # update node
             global_node_idx += 1
-            global_node_feat.append(torch.tensor([-5, -5]))  # verb-arg node
+            global_node_feat.append(torch.tensor([-5, -5]))  # verb node -> ed_v_a -> arg node
 
             # anti-srl edge: ed_a_v
             add_src.extend([entity_node_base + edge[2], global_node_idx])
             add_dst.extend([global_node_idx, entity_node_base + edge[0]])
             # update node
             global_node_idx += 1
-            global_node_feat.append(torch.tensor([-6, -6]))  # arg-verb node
+            global_node_feat.append(torch.tensor([-6, -6]))  # arg node -> ed_a_v -> verb node
 
     g = dgl.add_edges(g, torch.tensor(add_src), torch.tensor(add_dst))
     assert len(global_node_feat) == g.num_nodes()

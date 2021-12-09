@@ -1,0 +1,6 @@
+datasets==1.12.1
+torch==1.7.0
+transformers==4.5.1
+graphviz
+allennlp==2.7.0
+spacy==3.1.2

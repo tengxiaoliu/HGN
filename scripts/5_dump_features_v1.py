@@ -294,6 +294,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_query_
                 return _improve_answer_span(
                     subword_tokens, tok_start_position, tok_end_position, tokenizer, orig_text)
 
+        assert len(example.sent_names) == len(example.sent_start_end_position), \
+            "spans:" + str(len(example.sent_start_end_position)) + ", names:" + str(len(example.sent_names))
 
         entity_spans = []
         answer_candidates_ids = []
@@ -354,12 +356,17 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_query_
                 all_doc_tokens.append(sub_token)
             orig_to_tok_back_index.append(len(all_doc_tokens) - 1)  # 用来定位token idx到word idx
 
-        for sent_span in example.sent_start_end_position:
+        valid_sent_names = []
+        for (i, sent_span) in enumerate(example.sent_start_end_position):
             if sent_span[0] >= len(orig_to_tok_index) or sent_span[0] >= sent_span[1]:
                 continue
             sent_start_position = orig_to_tok_index[sent_span[0]]
             sent_end_position = orig_to_tok_back_index[sent_span[1]]
             sentence_spans.append((sent_start_position, sent_end_position))
+            valid_sent_names.append(example.sent_names[i])
+
+        assert len(valid_sent_names) == len(sentence_spans), \
+            "spans:" + str(len(sentence_spans)) + ", names:" + str(len(valid_sent_names))
 
         for para_span in example.para_start_end_position:
             if para_span[0] >= len(orig_to_tok_index) or para_span[0] >= para_span[1]:
@@ -393,7 +400,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_query_
 
         if sent_max_index < len(sentence_spans):
             sentence_spans = sentence_spans[:sent_max_index]
-            example.sent_names = example.sent_names[:sent_max_index]
+            valid_sent_names = valid_sent_names[:sent_max_index]
             max_tok_length = sentence_spans[-1][1]
 
             para_max_index = _largest_valid_index(para_spans, max_tok_length)
@@ -480,8 +487,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_query_
 
         # build dgl graph
         graph = build_dgl_graph_hotpot(example.nodes, edges, sentence_spans, para_spans, query_span,
-                                       example.sent_names, example.p_p_edges)
-
+                                       valid_sent_names, example.p_p_edges)
 
         features.append(
             InputFeatures(qas_id=example.qas_id,
@@ -495,11 +501,12 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_query_
                           query_segment_ids=query_segment_ids,
                           para_spans=para_spans,
                           sent_spans=sentence_spans,
-                          entity_spans=entity_spans,
+                          entity_spans=node_spans,
                           sup_fact_ids=sup_fact_ids,
                           sup_para_ids=sup_para_ids,
                           ans_type=ans_type,
                           token_to_orig_map=tok_to_orig_index,
+                          graph=graph,
                           edges=edges,
                           orig_answer_text=example.orig_answer_text,
                           answer_candidates_ids=answer_candidates_ids,
@@ -612,17 +619,20 @@ if __name__ == '__main__':
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path, do_lower_case=args.do_lower_case)
 
-    examples = read_hotpot_examples(para_file=args.para_path,
-                                    raw_file=args.raw_data,
-                                    ner_file=args.ner_path,
-                                    doc_link_file=args.doc_link_ner)
+    # examples = read_hotpot_examples(para_file=args.para_path,
+    #                                 raw_file=args.raw_data,
+    #                                 ner_file=args.ner_path,
+    #                                 doc_link_file=args.doc_link_ner)
     cached_examples_file = os.path.join(args.output_dir,
                                         get_cached_filename('examples_tx', args))
-    with gzip.open(cached_examples_file, 'wb') as fout:
-        pickle.dump(examples, fout)
-    print("[Examples] Successfully generated", len(examples), "examples.")
+    # with gzip.open(cached_examples_file, 'wb') as fout:
+    #     pickle.dump(examples, fout)
+    # print("[Examples] Successfully generated", len(examples), "examples.")
 
-    """
+    with gzip.open(cached_examples_file, 'rb') as fout:
+        examples = pickle.load(fout)
+    print("[Examples] Successfully loaded", len(examples), "examples.")
+
     features = convert_examples_to_features(examples, tokenizer,
                                             max_seq_length=args.max_seq_length,
                                             max_query_length=args.max_query_length,
@@ -632,16 +642,16 @@ if __name__ == '__main__':
                                             is_roberta=bool(args.model_type in ['roberta']),
                                             filter_no_ans=args.filter_no_ans)
     cached_features_file = os.path.join(args.output_dir,
-                                        get_cached_filename('features',  args))
+                                        get_cached_filename('features_tx',  args))
 
     with gzip.open(cached_features_file, 'wb') as fout:
         pickle.dump(features, fout)
+    print("[Features] Successfully generated", len(features), "features.")
 
     # build graphs
-    cached_graph_file = os.path.join(args.output_dir,
-                                     get_cached_filename('graphs', args))
-
-    graphs = build_graph(args, examples, features, args.max_entity_num)
-    with gzip.open(cached_graph_file, 'wb') as fout:
-        pickle.dump(graphs, fout)
-    """
+    # cached_graph_file = os.path.join(args.output_dir,
+    #                                  get_cached_filename('graphs', args))
+    #
+    # graphs = build_graph(args, examples, features, args.max_entity_num)
+    # with gzip.open(cached_graph_file, 'wb') as fout:
+    #     pickle.dump(graphs, fout)
