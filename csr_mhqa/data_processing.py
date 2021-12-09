@@ -13,10 +13,12 @@ from envs import DATASET_FOLDER
 
 IGNORE_INDEX = -100
 
-def get_cached_filename(f_type, config):
-    assert f_type in ['examples', 'features', 'graphs']
+import dgl
 
-    return f"cached_{f_type}_{config.model_type}_{config.max_seq_length}_{config.max_query_length}.pkl.gz"
+def get_cached_filename(f_type, config):
+    assert f_type in ['examples', 'features', 'graphs', 'examples_tx', 'features_tx', 'graphs_tx']
+
+    return f"cached_{f_type}_{config.model_type}_{config.max_seq_length}_{config.max_query_length}_{config.date}.pkl.gz"
 
 class Example(object):
 
@@ -131,22 +133,23 @@ class InputFeatures(object):
 
 class DataIteratorPack(object):
     def __init__(self,
-                 features, example_dict, graph_dict,
+                 features, example_dict,
                  bsz, device,
-                 para_limit, sent_limit, ent_limit, ans_ent_limit,
+                 para_limit, sent_limit, ent_limit,
                  mask_edge_types,
                  sequential=False):
         self.bsz = bsz
         self.device = device
         self.features = features
         self.example_dict = example_dict
-        self.graph_dict = graph_dict
+        # self.graph_dict = graph_dict
         self.sequential = sequential
         self.para_limit = para_limit
         self.sent_limit = sent_limit
         self.ent_limit = ent_limit
-        self.ans_ent_limit = ans_ent_limit
+        # self.ans_ent_limit = ans_ent_limit
         self.graph_nodes_num = 1 + para_limit + sent_limit + ent_limit
+        self.graph_higher_nodes_num = 1 + para_limit + sent_limit  # query, para, sent nodes num
         self.example_ptr = 0
         self.mask_edge_types = mask_edge_types
         self.max_seq_length = 512
@@ -197,7 +200,9 @@ class DataIteratorPack(object):
         is_gold_ent = torch.FloatTensor(self.bsz).cuda(self.device)
 
         # Graph related
-        graphs = torch.Tensor(self.bsz, self.graph_nodes_num, self.graph_nodes_num).cuda(self.device)
+        # graphs = torch.Tensor(self.bsz, self.graph_nodes_num, self.graph_nodes_num).cuda(self.device)
+        graphs = []
+        graphs_higher = torch.Tensor(self.bsz, self.graph_higher_nodes_num).cuda(self.device)
 
         while True:
             if self.example_ptr >= len(self.features):
@@ -220,7 +225,7 @@ class DataIteratorPack(object):
             is_gold_ent.fill_(IGNORE_INDEX)
 
             for i in range(len(cur_batch)):
-                case = cur_batch[i]
+                case = cur_batch[i]  # feature
                 context_idxs[i].copy_(torch.Tensor(case.doc_input_ids))
                 context_mask[i].copy_(torch.Tensor(case.doc_input_mask))
                 segment_idxs[i].copy_(torch.Tensor(case.doc_segment_ids))
@@ -249,16 +254,25 @@ class DataIteratorPack(object):
                         sent_start_mapping[i, j, start] = 1
                         sent_end_mapping[i, j, end] = 1
 
-                for j, ent_span in enumerate(case.entity_spans[:self.ent_limit]):
+                for j, ent_span in enumerate(case.entity_spans):
                     start, end = ent_span
                     if start <= end:
                         end = min(end, self.max_seq_length-1)
                         ent_mapping[i, start:end+1, j] = 1
                         ent_start_mapping[i, j, start] = 1
                         ent_end_mapping[i, j, end] = 1
-                    ans_cand_mask[i, j] = int(j in case.answer_candidates_ids)
+                #     # ans_cand_mask[i, j] = int(j in case.answer_candidates_ids)
 
-                is_gold_ent[i] = case.answer_in_entity_ids[0] if len(case.answer_in_entity_ids) > 0 else IGNORE_INDEX
+                # graph nodes include para, sent and entity_spans
+                # for j, node_span in enumerate(case.graph.ndata['pos']):
+                #     start, end = node_span
+                #     if start <= end:
+                #         end = min(end, self.max_seq_length - 1)
+                #         ent_mapping[i, start:end + 1, j] = 1
+                #         ent_start_mapping[i, j, start] = 1
+                #         ent_end_mapping[i, j, end] = 1
+
+                # is_gold_ent[i] = case.answer_in_entity_ids[0] if len(case.answer_in_entity_ids) > 0 else IGNORE_INDEX
 
                 if case.ans_type == 0 or case.ans_type == 3:
                     if len(case.end_position) == 0:
@@ -281,13 +295,17 @@ class DataIteratorPack(object):
                 if case.ans_type != 3:
                     is_gold_ent[i].fill_(IGNORE_INDEX)
 
-                tmp_graph = self.graph_dict[case.qas_id]
-                graph_adj = torch.from_numpy(tmp_graph['adj']).to(self.device)
-                for k in range(graph_adj.size(0)):
-                    graph_adj[k, k] = 8
-                for edge_type in self.mask_edge_types:
-                    graph_adj = torch.where(graph_adj == edge_type, torch.zeros_like(graph_adj), graph_adj)
-                graphs[i] = graph_adj
+                # tmp_graph = self.graph_dict[case.qas_id]
+                # graph_adj = torch.from_numpy(tmp_graph['adj']).to(self.device)
+                # for k in range(graph_adj.size(0)):
+                #     graph_adj[k, k] = 8
+                # for edge_type in self.mask_edge_types:
+                #     graph_adj = torch.where(graph_adj == edge_type, torch.zeros_like(graph_adj), graph_adj)
+                g = case.graph.to(self.device)
+                g = g.remove_self_loop(etype='coref')
+                graphs.append(g)
+                # graphs[i] = case.graph.to(self.device)
+                # graphs[i] = graph_adj
 
                 ids.append(case.qas_id)
 
@@ -297,6 +315,8 @@ class DataIteratorPack(object):
             para_mask = (para_mapping > 0).any(1).float()
             sent_mask = (sent_mapping > 0).any(1).float()
             ent_mask = (ent_mapping > 0).any(1).float()
+
+            # batched_graphs = dgl.batch(graphs)
 
             self.example_ptr += cur_bsz
 
@@ -311,7 +331,7 @@ class DataIteratorPack(object):
                 'q_type': q_type[:cur_bsz],
                 'is_support': is_support[:cur_bsz, :].contiguous(),
                 'is_gold_para': is_gold_para[:cur_bsz, :].contiguous(),
-                'is_gold_ent': is_gold_ent[:cur_bsz].contiguous(),
+                # 'is_gold_ent': is_gold_ent[:cur_bsz].contiguous(),
                 'query_mapping': query_mapping[:cur_bsz, :max_c_len].contiguous(),
                 'para_mapping': para_mapping[:cur_bsz, :max_c_len, :],
                 'para_start_mapping': para_start_mapping[:cur_bsz, :, :max_c_len],
@@ -325,8 +345,8 @@ class DataIteratorPack(object):
                 'ent_start_mapping': ent_start_mapping[:cur_bsz, :, :max_c_len],
                 'ent_end_mapping': ent_end_mapping[:cur_bsz, :, :max_c_len],
                 'ent_mask': ent_mask[:cur_bsz, :],
-                'ans_cand_mask': ans_cand_mask[:cur_bsz, :],
-                'graphs': graphs[:cur_bsz, :, :]
+                # 'ans_cand_mask': ans_cand_mask[:cur_bsz, :],
+                'graphs': graphs[:cur_bsz]
             }
 
 class DataHelper:
@@ -466,7 +486,7 @@ class DataHelper:
                                  para_limit=self.config.max_para_num,
                                  sent_limit=self.config.max_sent_num,
                                  ent_limit=self.config.max_entity_num,
-                                 ans_ent_limit=self.config.max_ans_ent_num,
+                                 # ans_ent_limit=self.config.max_ans_ent_num,
                                  mask_edge_types=self.config.mask_edge_types,
                                  sequential=True)
 
@@ -478,6 +498,6 @@ class DataHelper:
                                  para_limit=self.config.max_para_num,
                                  sent_limit=self.config.max_sent_num,
                                  ent_limit=self.config.max_entity_num,
-                                 ans_ent_limit=self.config.max_ans_ent_num,
+                                 # ans_ent_limit=self.config.max_ans_ent_num,
                                  mask_edge_types=self.config.mask_edge_types,
                                  sequential=False)
