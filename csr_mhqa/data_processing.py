@@ -11,6 +11,8 @@ from numpy.random import shuffle
 
 from envs import DATASET_FOLDER
 
+# from scripts.keg_utils import InputFeatures, Example
+
 IGNORE_INDEX = -100
 
 import dgl
@@ -19,6 +21,7 @@ def get_cached_filename(f_type, config):
     assert f_type in ['examples', 'features', 'graphs', 'examples_tx', 'features_tx', 'graphs_tx']
 
     return f"cached_{f_type}_{config.model_type}_{config.max_seq_length}_{config.max_query_length}_{config.date}.pkl.gz"
+
 
 class Example(object):
 
@@ -31,21 +34,18 @@ class Example(object):
                  sent_names,
                  sup_fact_id,
                  sup_para_id,
-                 ques_entities_text,
-                 ctx_entities_text,
                  para_start_end_position,
                  sent_start_end_position,
-                 ques_entity_start_end_position,
-                 ctx_entity_start_end_position,
                  question_text,
                  question_word_to_char_idx,
                  ctx_text,
                  ctx_word_to_char_idx,
-                 edges=None,
+                 nodes,
+                 edges,
+                 sent_nodes,
+                 p_p_edges=None,
+                 graph=None,
                  orig_answer_text=None,
-                 answer_in_ques_entity_ids=None,
-                 answer_in_ctx_entity_ids=None,
-                 answer_candidates_in_ctx_entity_ids=None,
                  start_position=None,
                  end_position=None):
         self.qas_id = qas_id
@@ -57,20 +57,19 @@ class Example(object):
         self.sent_names = sent_names
         self.sup_fact_id = sup_fact_id
         self.sup_para_id = sup_para_id
-        self.ques_entities_text = ques_entities_text
-        self.ctx_entities_text = ctx_entities_text
         self.para_start_end_position = para_start_end_position
         self.sent_start_end_position = sent_start_end_position
-        self.ques_entity_start_end_position = ques_entity_start_end_position
-        self.ctx_entity_start_end_position = ctx_entity_start_end_position
         self.question_word_to_char_idx = question_word_to_char_idx
         self.ctx_text = ctx_text
         self.ctx_word_to_char_idx = ctx_word_to_char_idx
+        self.graph = graph
+
+        self.p_p_edges = p_p_edges
+
+        self.nodes = nodes
         self.edges = edges
+        self.sent_nodes = sent_nodes
         self.orig_answer_text = orig_answer_text
-        self.answer_in_ques_entity_ids = answer_in_ques_entity_ids
-        self.answer_in_ctx_entity_ids = answer_in_ctx_entity_ids
-        self.answer_candidates_in_ctx_entity_ids= answer_candidates_in_ctx_entity_ids
         self.start_position = start_position
         self.end_position = end_position
 
@@ -90,14 +89,15 @@ class InputFeatures(object):
                  para_spans,
                  sent_spans,
                  entity_spans,
-                 q_entity_cnt,
                  sup_fact_ids,
                  sup_para_ids,
                  ans_type,
                  token_to_orig_map,
+                 graph,
+                 nodes=None,
+                 sent_nodes=None,
                  edges=None,
                  orig_answer_text=None,
-                 answer_in_entity_ids=None,
                  answer_candidates_ids=None,
                  start_position=None,
                  end_position=None):
@@ -116,15 +116,16 @@ class InputFeatures(object):
         self.para_spans = para_spans
         self.sent_spans = sent_spans
         self.entity_spans = entity_spans
-        self.q_entity_cnt = q_entity_cnt
         self.sup_fact_ids = sup_fact_ids
         self.sup_para_ids = sup_para_ids
         self.ans_type = ans_type
 
+        self.graph = graph
+        self.nodes = nodes
         self.edges = edges
+        self.sent_nodes = sent_nodes
         self.token_to_orig_map = token_to_orig_map
         self.orig_answer_text = orig_answer_text
-        self.answer_in_entity_ids = answer_in_entity_ids
         self.answer_candidates_ids = answer_candidates_ids
 
         self.start_position = start_position
@@ -136,7 +137,6 @@ class DataIteratorPack(object):
                  features, example_dict,
                  bsz, device,
                  para_limit, sent_limit, ent_limit,
-                 mask_edge_types,
                  sequential=False):
         self.bsz = bsz
         self.device = device
@@ -151,7 +151,7 @@ class DataIteratorPack(object):
         self.graph_nodes_num = 1 + para_limit + sent_limit + ent_limit
         self.graph_higher_nodes_num = 1 + para_limit + sent_limit  # query, para, sent nodes num
         self.example_ptr = 0
-        self.mask_edge_types = mask_edge_types
+        # self.mask_edge_types = mask_edge_types
         self.max_seq_length = 512
         if not sequential:
             shuffle(self.features)
@@ -254,7 +254,7 @@ class DataIteratorPack(object):
                         sent_start_mapping[i, j, start] = 1
                         sent_end_mapping[i, j, end] = 1
 
-                for j, ent_span in enumerate(case.entity_spans):
+                for j, ent_span in enumerate(case.entity_spans[:self.ent_limit]):
                     start, end = ent_span
                     if start <= end:
                         end = min(end, self.max_seq_length-1)
@@ -302,7 +302,7 @@ class DataIteratorPack(object):
                 # for edge_type in self.mask_edge_types:
                 #     graph_adj = torch.where(graph_adj == edge_type, torch.zeros_like(graph_adj), graph_adj)
                 g = case.graph.to(self.device)
-                g = g.remove_self_loop(etype='coref')
+                g = g.remove_self_loop()
                 graphs.append(g)
                 # graphs[i] = case.graph.to(self.device)
                 # graphs[i] = graph_adj
@@ -355,7 +355,7 @@ class DataHelper:
         self.gz = gz
         self.suffix = '.pkl.gz' if gz else '.pkl'
 
-        self.data_dir = join(DATASET_FOLDER, 'data_feat')
+        self.data_dir = join(DATASET_FOLDER, 'data_graph')
 
         self.__train_features__ = None
         self.__dev_features__ = None
@@ -418,7 +418,9 @@ class DataHelper:
         if getattr(self, name) is None:
             with self.get_pickle_file(file) as fin:
                 print('loading', file)
-                setattr(self, name, pickle.load(fin))
+                print("pkl file", fin)
+                tmp_load = pickle.load(fin)
+                setattr(self, name, tmp_load)
 
         return getattr(self, name)
 
@@ -439,15 +441,6 @@ class DataHelper:
     @property
     def dev_examples(self):
         return self.__get_or_load__('__dev_examples__', self.dev_example_file)
-
-    # Graphs
-    @property
-    def train_graphs(self):
-        return self.__get_or_load__('__train_graphs__', self.train_graph_file)
-
-    @property
-    def dev_graphs(self):
-        return self.__get_or_load__('__dev_graphs__', self.dev_graph_file)
 
     # Example dict
     @property
@@ -473,10 +466,10 @@ class DataHelper:
 
     # Load
     def load_dev(self):
-        return self.dev_features, self.dev_example_dict, self.dev_graphs
+        return self.dev_features, self.dev_example_dict
 
     def load_train(self):
-        return self.train_features, self.train_example_dict, self.train_graphs
+        return self.train_features, self.train_example_dict
 
     @property
     def dev_loader(self):
@@ -487,7 +480,7 @@ class DataHelper:
                                  sent_limit=self.config.max_sent_num,
                                  ent_limit=self.config.max_entity_num,
                                  # ans_ent_limit=self.config.max_ans_ent_num,
-                                 mask_edge_types=self.config.mask_edge_types,
+                                 # mask_edge_types=self.config.mask_edge_types,
                                  sequential=True)
 
     @property
@@ -499,5 +492,5 @@ class DataHelper:
                                  sent_limit=self.config.max_sent_num,
                                  ent_limit=self.config.max_entity_num,
                                  # ans_ent_limit=self.config.max_ans_ent_num,
-                                 mask_edge_types=self.config.mask_edge_types,
+                                 # mask_edge_types=self.config.mask_edge_types,
                                  sequential=False)
