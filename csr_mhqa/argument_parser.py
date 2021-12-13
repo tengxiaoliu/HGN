@@ -54,8 +54,11 @@ def complete_default_train_parser(args):
         args.n_gpu = 1
     args.device = device
 
-    args.num_gnn_layers = int(args.gnn.split(':')[1].split(',')[0])
-    args.num_gnn_heads = int(args.gnn.split(':')[1].split(',')[1])
+    # args.num_gnn_layers = int(args.gnn.split(':')[1].split(',')[0])
+    # args.num_gnn_heads = int(args.gnn.split(':')[1].split(',')[1])
+    args.gnn_attn_head = ([args.gnn_attn_head] * args.gnn_layer) + [1]
+
+
     if len(args.mask_edge_types):
         args.mask_edge_types = list(map(int, args.mask_edge_types.split(',')))
     args.max_doc_len = 512
@@ -167,8 +170,12 @@ def default_train_parser():
     parser.add_argument('--num_edge_type', type=int, default=8)
     parser.add_argument('--mask_edge_types', type=str, default="0")
 
-    parser.add_argument('--gnn', default='gat:1,2', type=str, help='gat:n_layer, n_head')
-    parser.add_argument("--gnn_drop", type=float, default=0.3)
+    # gat in DGL
+    parser.add_argument('--gnn_layer', default=3, type=int, help='gat num layer')
+    parser.add_argument('--gnn_attn_head', default=4, type=int, help='gat num of attention heads')
+    parser.add_argument('--gnn_residual', default=False, type=bool, help='gat residual connection')
+    parser.add_argument("--gnn_feat_drop", type=float, default=0.3, help='gat feature dropout rate')
+
     parser.add_argument('--q_attn', type=boolean_string, default='True', help='whether use query attention in GAT')
     parser.add_argument("--lstm_drop", type=float, default=0.3)
 
@@ -190,5 +197,7 @@ def default_train_parser():
     parser.add_argument("--sent_lambda", type=float, default=5)
     parser.add_argument("--ent_lambda", type=float, default=1)
     parser.add_argument("--sp_threshold", type=float, default=0.5)
+
+    parser.add_argument("--date", type=int, default=1203)
 
     return parser

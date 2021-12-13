@@ -43,7 +43,7 @@ class CSGat(nn.Module):
             config.hidden_dim, config.hidden_dim, config.gnn_attn_head[0],
             feat_drop=config.gnn_feat_drop, residual=False))
         # hidden layers
-        for l in range(1, config.gnn_layer - 2):
+        for l in range(1, config.gnn_layer):
             # due to multi-head, the in_dim = num_hidden * num_heads
             self.gat_layers.append(GATConv(
                 config.hidden_dim * config.gnn_attn_head[l - 1], config.hidden_dim, config.gnn_attn_head[l],
@@ -53,6 +53,7 @@ class CSGat(nn.Module):
             config.hidden_dim * config.gnn_attn_head[-2], config.hidden_dim, config.gnn_attn_head[-1],
             feat_drop=config.gnn_feat_drop, residual=config.gnn_residual))
 
+        self.graph_state_len = 100  # self.config.graph_state_len
         self.ctx_attention = GatedAttention(input_dim=config.hidden_dim*2,
                                             memory_dim=config.hidden_dim if config.q_update else config.hidden_dim*2,
                                             hid_dim=self.config.ctx_attn_hidden_dim,
@@ -71,7 +72,7 @@ class CSGat(nn.Module):
         trunc_query_mapping = query_mapping[:, :self.max_query_length].contiguous()
         trunc_query_state = (context_encoding * query_mapping.unsqueeze(2))[:, :self.max_query_length, :].contiguous()
         # bert encoding query vec
-        query_vec = mean_pooling(trunc_query_state, trunc_query_mapping)
+        # query_vec = mean_pooling(trunc_query_state, trunc_query_mapping)
 
         attn_output, trunc_query_state = self.bi_attention(context_encoding,
                                                            trunc_query_state,
@@ -118,8 +119,9 @@ class CSGat(nn.Module):
 
         # to get whole graph feature, stack states of query, paras, sents, ents and edge nodes in a whole
         # didn't think of a good way to do this in parallel
-        graphs = batch['graph']
+        graphs = batch['graphs']
         all_features = []
+        qps_idx = []  # maintain query, para, sent index
         for g_idx, g in enumerate(graphs):
             g_ed_node_feats = []
             tmp_ed_node_feat = []
@@ -134,14 +136,21 @@ class CSGat(nn.Module):
                 else:
                     tmp_pse_num += 1
                     if g.ndata['pos'][i][0] < 0:
-                        g_ed_node_feats.append(torch.stack(tmp_ed_node_feat))
+                        g_ed_node_feats.append(torch.stack(tmp_ed_node_feat).to(self.config.device))
                         tmp_ed_node_feat = []
             # g_feats = query_vec + para_vec + g_ed_node_feats[0] + sent_vec + g_ed_node_feats[1] + ent_vec
+            g_ed_node_feats.append(torch.stack(tmp_ed_node_feat).to(self.config.device))
+            print(g_ed_node_feats[0].device)
             g_feats = torch.cat((query_vec[g_idx:g_idx+1], para_state[g_idx][:pse_num[0]], g_ed_node_feats[0],
                                  sent_state[g_idx][:pse_num[1]], g_ed_node_feats[1],
                                  ent_state[g_idx][:pse_num[2]], g_ed_node_feats[2]), dim=0)
             all_features.append(g_feats)
-        all_features = torch.stack(all_features)
+            qps_idx.append([(0, 1), (1, 1 + pse_num[0]), (1 + pse_num[0] + len(g_ed_node_feats[0]),
+                                                          1 + pse_num[0] + len(g_ed_node_feats[0]) + pse_num[1]),
+                            (1+pse_num[0]+len(g_ed_node_feats[0]) + pse_num[1]+len(g_ed_node_feats[1]),
+                             1+pse_num[0]+len(g_ed_node_feats[0]) + pse_num[1]+len(g_ed_node_feats[1]) + pse_num[2])])
+        all_features = torch.cat(all_features, dim=0)
+        b_h = all_features
 
         # Graph module
         graph_list = []
@@ -150,12 +159,34 @@ class CSGat(nn.Module):
             graph_list.append(g.add_self_loop())
         bg = dgl.batch(graph_list)
 
-        for l in range(self.gnn_layer):
-            all_features = self.gat_layers[l](bg, all_features).flatten(1)
+        for l in range(self.config.gnn_layer):
+            b_h = self.gat_layers[l](bg, b_h).flatten(1)
         # output projection
-        all_features = self.gat_layers[-1](bg, all_features).flatten(1)
+        b_h = self.gat_layers[-1](bg, b_h).flatten(1)
+
+        bg.ndata['pos'] = torch.cat((b_h, all_features), dim=-1)
 
         # process graph features
+        sub_graphs = dgl.unbatch(bg)
+        graph_state = []
+        # 1213: keep query, para and sent node index
+        for g_idx, g in enumerate(sub_graphs):
+            feat = g.ndata['pos']
+            qps = qps_idx[g_idx]
+            g_state_idx = torch.cat([torch.arange(pair[0], pair[1]) for pair in qps[:-1]])
+            if len(g_state_idx) < self.graph_state_len:
+                g_state_idx = torch.cat([g_state_idx, torch.arange(qps[-1][0], qps[-1][0] + self.graph_state_len - len(g_state_idx))])
+            assert len(g_state_idx) == self.graph_state_len
+            graph_state.append(feat[g_state_idx, :].squeeze())
+        graph_state = torch.stack(graph_state)
+        # input_state: [4, 502, 300]
+        input_state, _ = self.ctx_attention(input_state, graph_state, torch.ones(graph_state.size(0), graph_state.size(1)).to(self.config.device))
+        # honestly speaking, i'm not so sure how to use input state
+
+
+
+
+
 
 
 
