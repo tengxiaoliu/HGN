@@ -669,6 +669,7 @@ def build_dgl_graph_hotpot(nodes, edges, sent_spans, para_spans, query_span, sen
     sent_node_base = global_node_idx
     global_node_idx += len(sent_names)
     tmp_ed_feat = []
+    tmp_sent_id = 0  # maintains the index of current sent in its graph
 
     for s_idx, sent in enumerate(sent_spans):
         global_src.extend([sent_to_para[s_idx] + 1, global_node_idx])
@@ -687,6 +688,19 @@ def build_dgl_graph_hotpot(nodes, edges, sent_spans, para_spans, query_span, sen
             # update node
             global_node_idx += 1
             tmp_ed_feat.append(torch.tensor([-4, -4]))  # sent node -> ed_s_s -> sent node
+
+            tmp_sent_id += 1
+        else:
+            tmp_sent_id = 0
+
+        if tmp_sent_id <= 1:
+            # query node <-> ed_q_p (ed_q_s) <-> sent node [-2, -2]
+            global_src.extend([0, global_node_idx])
+            global_dst.extend([global_node_idx, sent_node_base + s_idx])
+
+            # update node
+            global_node_idx += 1
+            tmp_ed_feat.append(torch.tensor([-2, -2]))  # para node -> ed_p_s -> sent node
 
     global_node_feat.extend(tmp_ed_feat)
     assert len(global_node_feat) == global_node_idx
