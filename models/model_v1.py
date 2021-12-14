@@ -54,13 +54,16 @@ class CSGat(nn.Module):
             feat_drop=config.gnn_feat_drop, residual=config.gnn_residual))
 
         self.graph_state_len = 100  # self.config.graph_state_len
-        self.ctx_attention = GatedAttention(input_dim=config.hidden_dim*2,
-                                            memory_dim=config.hidden_dim if config.q_update else config.hidden_dim*2,
+        self.ctx_attention = GatedAttention(input_dim=config.hidden_dim * 2,
+                                            memory_dim=config.hidden_dim,  # if config.q_update else config.hidden_dim*2
                                             hid_dim=self.config.ctx_attn_hidden_dim,
                                             dropout=config.bi_attn_drop,
                                             gate_method=self.config.ctx_attn)
 
-        q_dim = self.hidden_dim if config.q_update else config.input_dim
+        q_dim = self.hidden_dim  # if config.q_update else config.input_dim
+
+        self.graph_feat_mlp = nn.Linear(self.hidden_dim * 2, self.hidden_dim)
+        self.sent_mlp = OutputLayer(self.hidden_dim, config, num_answer=1)
 
         self.predict_layer = PredictionLayer(self.config, q_dim)
 
@@ -85,8 +88,8 @@ class CSGat(nn.Module):
         #     query_vec = mean_pooling(trunc_query_state, trunc_query_mapping)
         query_vec = mean_pooling(trunc_query_state, trunc_query_mapping)
 
-        para_logits, sent_logits = [], []
-        para_predictions, sent_predictions, ent_predictions = [], [], []
+        # para_logits, sent_logits = [], []
+        # para_predictions, sent_predictions, ent_predictions = [], [], []
 
         # observe the above vectors, todo: concatenate vectors into graph features
 
@@ -164,11 +167,13 @@ class CSGat(nn.Module):
         # output projection
         b_h = self.gat_layers[-1](bg, b_h).flatten(1)
 
-        bg.ndata['pos'] = torch.cat((b_h, all_features), dim=-1)
+        bg.ndata['pos'] = self.graph_feat_mlp(torch.cat((b_h, all_features), dim=-1))
 
         # process graph features
         sub_graphs = dgl.unbatch(bg)
         graph_state = []
+        sent_feats = []
+        para_feats = []
         # 1213: keep query, para and sent node index
         for g_idx, g in enumerate(sub_graphs):
             feat = g.ndata['pos']
@@ -178,41 +183,55 @@ class CSGat(nn.Module):
                 g_state_idx = torch.cat([g_state_idx, torch.arange(qps[-1][0], qps[-1][0] + self.graph_state_len - len(g_state_idx))])
             assert len(g_state_idx) == self.graph_state_len
             graph_state.append(feat[g_state_idx, :].squeeze())
+
+            # extract sent features
+            # sent_feats.append(feat[qps_idx[g_idx][2][0]: qps_idx[g_idx][2][1]])
+            para_feats.append(feat[qps_idx[g_idx][1][0]: qps_idx[g_idx][1][0] + self.config.max_para_num])
+            sent_feats.append(feat[qps_idx[g_idx][2][0]: qps_idx[g_idx][2][0] + self.config.max_sent_num])
+
         graph_state = torch.stack(graph_state)
         # input_state: [4, 502, 300]
         input_state, _ = self.ctx_attention(input_state, graph_state, torch.ones(graph_state.size(0), graph_state.size(1)).to(self.config.device))
         # honestly speaking, i'm not so sure how to use input state
 
+        # Predict paragraph
 
+        # Predict supporting fact, using sent feats
+        para_logit = self.sent_mlp(torch.stack(para_feats)).contiguous()
+        para_logits_aux = Variable(para_logit.data.new(para_logit.size(0), para_logit.size(1), 1).zero_())  # 这一步的意义是什么?
+        para_prediction = torch.cat([para_logits_aux, para_logit], dim=-1).contiguous()
 
+        sent_logit = self.sent_mlp(torch.stack(sent_feats)).contiguous()
+        sent_logits_aux = Variable(sent_logit.data.new(sent_logit.size(0), sent_logit.size(1), 1).zero_())
+        sent_prediction = torch.cat([sent_logits_aux, sent_logit], dim=-1).contiguous()
 
-
-
-
-
-
-
-
-
-
-
-
-        for l in range(self.config.num_gnn_layers):
-            new_input_state, graph_state, graph_mask, sent_state, query_vec, para_logit, para_prediction, \
-            sent_logit, sent_prediction, ent_logit = self.graph_blocks[l](batch, input_state, query_vec)
-
-            para_logits.append(para_logit)
-            sent_logits.append(sent_logit)
-            para_predictions.append(para_prediction)
-            sent_predictions.append(sent_prediction)
-            ent_predictions.append(ent_logit)
-
-        input_state, _ = self.ctx_attention(input_state, graph_state, graph_mask.squeeze(-1))
-        predictions = self.predict_layer(batch, input_state, sent_logits[-1], packing_mask=query_mapping, return_yp=return_yp)
+        # Predict answer span, using input state
+        return_yp = False
+        predictions = self.predict_layer(batch, input_state, sent_logit, packing_mask=query_mapping,
+                                         return_yp=return_yp)
 
         if return_yp:
             start, end, q_type, yp1, yp2 = predictions
-            return start, end, q_type, para_predictions[-1], sent_predictions[-1], ent_predictions[-1], yp1, yp2
+            return start, end, q_type, para_prediction, sent_prediction, yp1, yp2
         else:
             start, end, q_type = predictions
-            return start, end, q_type, para_predictions[-1], sent_predictions[-1], ent_predictions[-1]
+            return start, end, q_type, para_prediction, sent_prediction
+        # for l in range(self.config.num_gnn_layers):
+        #     new_input_state, graph_state, graph_mask, sent_state, query_vec, para_logit, para_prediction, \
+        #     sent_logit, sent_prediction, ent_logit = self.graph_blocks[l](batch, input_state, query_vec)
+        #
+        #     para_logits.append(para_logit)
+        #     sent_logits.append(sent_logit)
+        #     para_predictions.append(para_prediction)
+        #     sent_predictions.append(sent_prediction)
+        #     ent_predictions.append(ent_logit)
+        #
+        # input_state, _ = self.ctx_attention(input_state, graph_state, graph_mask.squeeze(-1))
+        # predictions = self.predict_layer(batch, input_state, sent_logits[-1], packing_mask=query_mapping, return_yp=return_yp)
+        #
+        # if return_yp:
+        #     start, end, q_type, yp1, yp2 = predictions
+        #     return start, end, q_type, para_predictions[-1], sent_predictions[-1], ent_predictions[-1], yp1, yp2
+        # else:
+        #     start, end, q_type = predictions
+        #     return start, end, q_type, para_predictions[-1], sent_predictions[-1], ent_predictions[-1]

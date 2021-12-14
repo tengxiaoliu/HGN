@@ -5,7 +5,8 @@ import torch.nn.functional as F
 from torch.nn.utils import rnn
 from torch.autograd import Variable
 
-from transformers.modeling_bert import BertLayer, gelu
+# from transformers.modeling_bert import BertLayer, gelu
+from transformers.activations import gelu
 from csr_mhqa.utils import get_weights, get_act
 
 
@@ -290,7 +291,7 @@ class GraphBlock(nn.Module):
         ent_logit = self.entity_mlp(ent_state).view(N, -1)
         ent_logit = ent_logit - 1e30 * (1 - batch['ans_cand_mask'])
 
-        para_logits_aux = Variable(para_logit.data.new(para_logit.size(0), para_logit.size(1), 1).zero_())
+        para_logits_aux = Variable(para_logit.data.new(para_logit.size(0), para_logit.size(1), 1).zero_())  # 这一步的意义是什么?
         para_prediction = torch.cat([para_logits_aux, para_logit], dim=-1).contiguous()
 
         sent_logits_aux = Variable(sent_logit.data.new(sent_logit.size(0), sent_logit.size(1), 1).zero_())
@@ -453,7 +454,7 @@ class PredictionLayer(nn.Module):
 
         self.start_linear = OutputLayer(input_dim, config, num_answer=1)
         self.end_linear = OutputLayer(input_dim, config, num_answer=1)
-        self.type_linear = OutputLayer(input_dim, config, num_answer=4)
+        self.type_linear = OutputLayer(input_dim, config, num_answer=3)
 
         self.cache_S = 0
         self.cache_mask = None

@@ -1,14 +1,20 @@
 {
-    "exp_name": "roberta_lr1e-5",
+    "exp_name": "roberta_lr1e-5_tx",
     "model_type": "roberta",
-    "encoder_name_or_path": "roberta-large",
+    "encoder_name_or_path": "roberta-base",
     "num_train_epochs": 5,
-    "per_gpu_train_batch_size": 8,
+    "per_gpu_train_batch_size": 4,
     "learning_rate": 1e-5,
-    "gradient_accumulation_steps": 1,
-    "gpu_id": "0",
-    "gnn_drop": 0.3,
+    "gradient_accumulation_steps": 2,
+    "gpu_id": "0,1",
+    "gnn_layer": 4,
+    "gnn_attn_head": 4,
+    "gnn_feat_drop": 0.3,
+
     "bi_attn_drop": 0.3,
+    "max_entity_num": 500,
     "trans_drop": 0.2,
-    "fp16": "True"
+    "fp16": "False",
+    "local_rank": 0,
+    "date": 1203
 }
