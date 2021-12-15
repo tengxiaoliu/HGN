@@ -380,33 +380,45 @@ class DataHelper:
 
         return join(self.data_dir, tag, cached_filename)
 
-    def get_graph_file(self, tag):
-        cached_filename = get_cached_filename('graphs', self.config)
-        return join(self.data_dir, tag, cached_filename)
+    # def get_graph_file(self, tag):
+    #     cached_filename = get_cached_filename('graphs', self.config)
+    #     return join(self.data_dir, tag, cached_filename)
 
     @property
     def train_feature_file(self):
-        return self.get_feature_file('train')
+        if len(self.config.train_feature_path) > 0:
+            return self.config.train_feature_path
+        else:
+            return self.get_feature_file('train')
 
     @property
     def dev_feature_file(self):
-        return self.get_feature_file('dev_distractor')
+        if len(self.config.dev_feature_path) > 0:
+            return self.config.dev_feature_path
+        else:
+            return self.get_feature_file('dev_distractor')
 
     @property
     def train_example_file(self):
-        return self.get_example_file('train')
+        if len(self.config.train_example_path) > 0:
+            return self.config.train_example_path
+        else:
+            return self.get_example_file('train')
 
     @property
     def dev_example_file(self):
-        return self.get_example_file('dev_distractor')
+        if len(self.config.dev_example_path) > 0:
+            return self.config.dev_example_path
+        else:
+            return self.get_example_file('dev_distractor')
 
-    @property
-    def train_graph_file(self):
-        return self.get_graph_file('train')
+    # @property
+    # def train_graph_file(self):
+    #     return self.get_graph_file('train')
 
-    @property
-    def dev_graph_file(self):
-        return self.get_graph_file('dev_distractor')
+    # @property
+    # def dev_graph_file(self):
+    #     return self.get_graph_file('dev_distractor')
 
     def get_pickle_file(self, file_name):
         if self.gz:

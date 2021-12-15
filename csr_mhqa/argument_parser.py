@@ -199,5 +199,9 @@ def default_train_parser():
     parser.add_argument("--sp_threshold", type=float, default=0.5)
 
     parser.add_argument("--date", type=int, default=1203)
+    parser.add_argument("--train_example_path", type=str, default="")
+    parser.add_argument("--train_feature_path", type=str, default="")
+    parser.add_argument("--dev_example_path", type=str, default="")
+    parser.add_argument("--dev_feature_path", type=str, default="")
 
     return parser

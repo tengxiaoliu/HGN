@@ -14,13 +14,13 @@ import spacy
 
 from spacy.tokenizer import Tokenizer
 from tqdm import tqdm
-from keg_utils import Example, InputFeatures, build_graph_hotpot, build_dgl_graph_hotpot
+from keg_utils import build_graph_hotpot, build_dgl_graph_hotpot
 
 import sys
 sys.path.append('..')
 
 from model_envs import MODEL_CLASSES
-from csr_mhqa.data_processing import get_cached_filename
+from csr_mhqa.data_processing import Example, InputFeatures, get_cached_filename
 from eval.hotpot_evaluate_v1 import normalize_answer
 
 
@@ -33,12 +33,13 @@ nlp.tokenizer.infix_finditer = infix_re.finditer
 #nlp.tokenizer = custom_tokenizer(nlp)
 
 import transformers
-print("transformers", transformers.__version__)
+# print("transformers", transformers.__version__)
 
 def read_hotpot_examples(para_file,
                          raw_file,
                          ner_file,
-                         doc_link_file):
+                         doc_link_file,
+                         args):
 
     with open(para_file, 'r', encoding='utf-8') as reader:
         para_data = json.load(reader)
@@ -91,7 +92,9 @@ def read_hotpot_examples(para_file,
 
     max_sent_cnt, max_entity_cnt = 0, 0
     examples = []
-    for case in tqdm(raw_data):
+
+    exclusion = []
+    for case_idx, case in enumerate(tqdm(raw_data)):
         # extract and normalise useful info from datasets
         key = case['_id']
         qas_type = case['type']
@@ -122,7 +125,20 @@ def read_hotpot_examples(para_file,
 
         for title in itertools.chain.from_iterable(sel_paras):
             ctx_text_list.extend(context[title])
-        nodes, edges, sent_nodes = build_graph_hotpot(ctx_text_list, question_text)
+
+        try:
+            nodes, edges, sent_nodes = build_graph_hotpot(ctx_text_list, question_text)
+        except RuntimeError as e:
+            print("Excluded", case_idx, ", encountering Runtime error in building graph (SRL and Coref):\n", e)
+            exclusion.append(case_idx)
+            continue
+        except:
+            print("Excluded", case_idx, "due to unknown error.")
+            exclusion.append(case_idx)
+            continue
+
+
+        # nodes, edges, sent_nodes = build_graph_hotpot(ctx_text_list, question_text)
         # to unify the tokenization of sentences
 
         global_sent_id = 0
@@ -256,8 +272,17 @@ def read_hotpot_examples(para_file,
         )
         examples.append(example)
 
+        # save examples occasionally
+        if (len(examples) % 10000 == 0 and len(examples) > 0) or len(examples) == 50:
+            cached_examples_file = os.path.join(args.output_dir,
+                                                str(len(examples)) + "_" + get_cached_filename('examples', args))
+            with gzip.open(cached_examples_file, 'wb') as fout:
+                pickle.dump(examples, fout)
+            print("[Examples] Successfully generated", len(examples), "examples.")
+
     print("Maximum sentence cnt: {}".format(max_sent_cnt))
     print("Maximum entity cnt: {}".format(max_entity_cnt))
+    print("Excluded in total: {}".format(len(exclusion)))
 
     return examples
 
@@ -614,6 +639,8 @@ if __name__ == '__main__':
                         help="Set this flag if you are using an uncased model.")
 
     parser.add_argument("--date", default=1209, type=int)
+    parser.add_argument("--example_path", type=str, default="")
+
     args = parser.parse_args()
 
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
@@ -622,16 +649,34 @@ if __name__ == '__main__':
     # examples = read_hotpot_examples(para_file=args.para_path,
     #                                 raw_file=args.raw_data,
     #                                 ner_file=args.ner_path,
-    #                                 doc_link_file=args.doc_link_ner)
-    cached_examples_file = os.path.join(args.output_dir,
-                                        get_cached_filename('examples_tx', args))
+    #                                 doc_link_file=args.doc_link_ner,
+    #                                 args=args)
+    # cached_examples_file = os.path.join(args.output_dir,
+    #                                     get_cached_filename('examples', args))
     # with gzip.open(cached_examples_file, 'wb') as fout:
     #     pickle.dump(examples, fout)
     # print("[Examples] Successfully generated", len(examples), "examples.")
 
-    with gzip.open(cached_examples_file, 'rb') as fout:
-        examples = pickle.load(fout)
-    print("[Examples] Successfully loaded", len(examples), "examples.")
+    # with gzip.open(cached_examples_file, 'rb') as fout:
+    #     examples = pickle.load(fout)
+    # print("[Examples] Successfully loaded", len(examples), "examples.")
+    print("example path:", args.example_path)
+    if len(args.example_path) > 0:
+        cached_examples_file = os.path.join(args.output_dir, args.example_path)
+        with gzip.open(cached_examples_file, 'rb') as fout:
+            examples = pickle.load(fout)
+        print("[Examples] Successfully loaded", len(examples), "examples from", cached_examples_file)
+    else:
+        examples = read_hotpot_examples(para_file=args.para_path,
+                                        raw_file=args.raw_data,
+                                        ner_file=args.ner_path,
+                                        doc_link_file=args.doc_link_ner,
+                                        args=args)
+        cached_examples_file = os.path.join(args.output_dir,
+                                            get_cached_filename('examples', args))
+        with gzip.open(cached_examples_file, 'wb') as fout:
+            pickle.dump(examples, fout)
+        print("[Examples] Successfully generated", len(examples), "examples to", cached_examples_file)
 
     features = convert_examples_to_features(examples, tokenizer,
                                             max_seq_length=args.max_seq_length,
@@ -642,11 +687,11 @@ if __name__ == '__main__':
                                             is_roberta=bool(args.model_type in ['roberta']),
                                             filter_no_ans=args.filter_no_ans)
     cached_features_file = os.path.join(args.output_dir,
-                                        get_cached_filename('features_tx',  args))
+                                        get_cached_filename('features',  args))
 
     with gzip.open(cached_features_file, 'wb') as fout:
         pickle.dump(features, fout)
-    print("[Features] Successfully generated", len(features), "features.")
+    print("[Features] Successfully generated", len(features), "features at", cached_features_file)
 
     # build graphs
     # cached_graph_file = os.path.join(args.output_dir,

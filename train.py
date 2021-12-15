@@ -49,8 +49,8 @@ helper = DataHelper(gz=True, config=args)
 train_dataloader = helper.train_loader
 print("Loaded train loader")
 
-# dev_example_dict = helper.dev_example_dict
-# dev_feature_dict = helper.dev_feature_dict
+dev_example_dict = helper.dev_example_dict
+dev_feature_dict = helper.dev_feature_dict
 dev_dataloader = helper.dev_loader
 print("Loaded dev loader")
 

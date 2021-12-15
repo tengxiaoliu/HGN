@@ -14,7 +14,8 @@ from torch import nn
 from tqdm import tqdm
 
 from model_envs import MODEL_CLASSES, ALL_MODELS
-from transformers.tokenization_bert import whitespace_tokenize, BasicTokenizer, BertTokenizer
+# from transformers.tokenization_bert import whitespace_tokenize, BasicTokenizer, BertTokenizer
+from transformers import BasicTokenizer
 from transformers import AdamW
 from eval.hotpot_evaluate_v1 import normalize_answer, eval as hotpot_eval
 from csr_mhqa.data_processing import IGNORE_INDEX
@@ -68,7 +69,8 @@ def get_optimizer(encoder, model, args, learning_rate, remove_pooler=False):
 
     return optimizer
 
-def compute_loss(args, batch, start, end, para, sent, ent, q_type):
+def compute_loss(args, batch, start, end, para, sent, q_type):
+    # delete ent and loss_ent
     criterion = nn.CrossEntropyLoss(reduction='mean', ignore_index=IGNORE_INDEX)
     binary_criterion = nn.BCEWithLogitsLoss(reduction='mean')
     loss_span = args.ans_lambda * (criterion(start, batch['y1']) + criterion(end, batch['y2']))
@@ -78,12 +80,12 @@ def compute_loss(args, batch, start, end, para, sent, ent, q_type):
     sent_gold = batch['is_support'].long().view(-1)
     loss_sup = args.sent_lambda * criterion(sent_pred, sent_gold.long())
 
-    loss_ent = args.ent_lambda * criterion(ent, batch['is_gold_ent'].long())
+    # loss_ent = args.ent_lambda * criterion(ent, batch['is_gold_ent'].long())
     loss_para = args.para_lambda * criterion(para.view(-1, 2), batch['is_gold_para'].long().view(-1))
 
-    loss = loss_span + loss_type + loss_sup + loss_ent + loss_para
+    loss = loss_span + loss_type + loss_sup + loss_para
 
-    return loss, loss_span, loss_type, loss_sup, loss_ent, loss_para
+    return loss, loss_span, loss_type, loss_sup, loss_para
 
 
 def eval_model(args, encoder, model, dataloader, example_dict, feature_dict, prediction_file, eval_file, dev_gold_file):
